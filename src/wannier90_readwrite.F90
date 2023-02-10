@@ -742,6 +742,11 @@ contains
       end if
     end if
 
+    wann_control%use_tdc = .false.
+    call w90_readwrite_get_keyword('use_tdc', found, error, comm, &
+                                   l_value=wann_control%use_tdc)
+    if (allocated(error)) return
+
     wann_control%constrain%lambda = 1.0_dp
     call w90_readwrite_get_keyword('slwf_lambda', found, error, comm, &
                                    r_value=wann_control%constrain%lambda)
@@ -1881,6 +1886,7 @@ contains
     write (stdout, '(1x,a46,10x,L8,13x,a1)') '|  Post-processing setup (write *.nnkp)      :', &
       w90_calculation%postproc_setup, '|'
     write (stdout, '(1x,a46,10x,L8,13x,a1)') '|  Using Gamma-only branch of algorithms     :', gamma_only, '|'
+    write (stdout, '(1x,a46,10x,L8,13x,a1)') '|  Using TDC Formulation (Experimental)      :', wann_control%use_tdc, '|'
     !YN: RS:
     if (lsitesymmetry) then
       write (stdout, '(1x,a46,10x,L8,13x,a1)') '|  Using symmetry-adapted WF mode            :', lsitesymmetry, '|'
@@ -2831,6 +2837,9 @@ contains
     if (allocated(error)) return
 
     call comms_bcast(wann_control%guiding_centres%enable, 1, error, comm)
+    if (allocated(error)) return
+
+    call comms_bcast(wann_control%use_tdc, 1, error, comm)
     if (allocated(error)) return
 
     call comms_bcast(w90_calculation%wannier_plot, 1, error, comm)

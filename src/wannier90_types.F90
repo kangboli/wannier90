@@ -188,6 +188,9 @@ module w90_wannier90_types
     real(kind=dp) :: conv_noise_amp
     integer :: conv_noise_num
     type(wann_slwf_type) :: constrain
+
+    ! related to the truncated density convolution
+    logical :: use_tdc
   end type wann_control_type
 
   type wann_omega_type
