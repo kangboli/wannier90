@@ -165,6 +165,7 @@ contains
     complex(kind=dp), allocatable :: cdodq_precond_loc(:, :, :)
     real(kind=dp), allocatable :: sheet(:, :, :)
     real(kind=dp), allocatable :: rave(:, :), r2ave(:), rave2(:)
+    complex(kind=dp), allocatable :: rho(:, :)
 
     !local arrays not passed into subroutines
     complex(kind=dp), allocatable  :: cwschur1(:), cwschur2(:)
@@ -443,6 +444,14 @@ contains
       return
     endif
 
+    if (wann_control%use_tdc) then
+      allocate (rho(num_wann, kmesh_info%nntot), stat=ierr)
+      if (ierr /= 0) then
+        call set_error_alloc(error, 'Error in allocating rho in wann_main', comm)
+        return
+      endif
+    end if
+
     cwschur1 = cmplx_0; cwschur2 = cmplx_0; cwschur3 = cmplx_0; cwschur4 = cmplx_0
     cdq = cmplx_0; cz = cmplx_0; cmtmp = cmplx_0; cdqkeep_loc = cmplx_0; cdq_loc = cmplx_0
     ! buff=cmplx_0
@@ -492,13 +501,25 @@ contains
     end if
 
     ! calculate initial centers and spread
-    call wann_omega(csheet, sheet, rave, r2ave, rave2, wann_spread, num_wann, kmesh_info, &
-                    num_kpts, print_output, wann_control%constrain, omega%invariant, counts, &
-                    displs, ln_tmp_loc, m_matrix_loc, lambda_loc, first_pass, timer, error, comm)
+    if (.not. wann_control%use_tdc) then
+      call wann_omega(csheet, sheet, rave, r2ave, rave2, wann_spread, num_wann, kmesh_info, &
+                      num_kpts, print_output, wann_control%constrain, omega%invariant, counts, &
+                      displs, ln_tmp_loc, m_matrix_loc, lambda_loc, first_pass, timer, error, comm)
+    else
+      call tdc_omega(csheet, sheet, rave, r2ave, rho, wann_spread, num_wann, kmesh_info, &
+          num_kpts, print_output, counts, displs, m_matrix_loc, timer, error, comm)
+      ! write (stdout, *) m_matrix_loc(:, :, 1, 7)
+      ! write (stdout, *) rho(1, :, 1)
+      do nkp = 1,num_kpts
+        do n = 1, kmesh_info%nntot
+          write (stdout, *) kmesh_info%bk(:, n, nkp)
+        enddo
+      enddo
+    end if
     if (allocated(error)) return
 
     ! public variables
-    if (.not. wann_control%constrain%selective_loc) then
+    if (.not. wann_control%constrain%selective_loc .or. .not. wann_control%use_tdc) then
       omega%total = wann_spread%om_tot
       omega%invariant = wann_spread%om_i
       omega%tilde = wann_spread%om_d + wann_spread%om_od
@@ -511,6 +532,9 @@ contains
     ! public arrays of Wannier centres and spreads
     wannier_data%centres = rave
     wannier_data%spreads = r2ave - rave2
+    if (wann_control%use_tdc) then
+      wannier_data%spreads = r2ave
+    end if
 
     if (wann_control%lfixstep) lquad = .false.
     ncg = 0
@@ -569,6 +593,7 @@ contains
       open (unit=page_unit, status='scratch', form='unformatted')
     endif
 
+    return
     ! main iteration loop
     do iter = 1, wann_control%num_iter
 
@@ -1142,6 +1167,14 @@ contains
       deallocate (rnr0n2, stat=ierr)
       if (ierr /= 0) then
         call set_error_dealloc(error, 'Error in deallocating rnr0n2 in wann_main', comm)
+        return
+      endif
+    end if
+
+    if (wann_control%use_tdc) then
+      deallocate (rho, stat=ierr)
+      if (ierr /= 0) then
+        call set_error_dealloc(error, 'Error in deallocating rho in wann_main', comm)
         return
       endif
     end if
@@ -2118,6 +2151,87 @@ contains
   end subroutine wann_phases
 
   !================================================!
+  subroutine tdc_omega(csheet, sheet, rave, r2ave, rho, wann_spread, num_wann, kmesh_info, &
+          num_kpts, print_output, counts, displs, m_matrix_loc, timer, error, comm)
+    !================================================!
+    !
+    !!   Calculate the Wannier Function spread using TDC
+    !================================================
+
+    use w90_io, only: io_stopwatch_start, io_stopwatch_stop
+    use w90_comms, only: comms_allreduce, w90comm_type, mpirank
+    use w90_types, only: kmesh_info_type, print_output_type, timer_list_type
+
+    implicit none
+
+    ! arguments
+    type(kmesh_info_type), intent(in) :: kmesh_info
+    type(localisation_vars_type), intent(out)  :: wann_spread
+    type(print_output_type), intent(in) :: print_output
+    type(w90comm_type), intent(in) :: comm
+    type(timer_list_type), intent(inout) :: timer
+    type(w90_error_type), allocatable, intent(out) :: error
+
+    integer, intent(in) :: counts(0:), displs(0:)
+    integer, intent(in) :: num_kpts
+    integer, intent(in) :: num_wann
+
+    complex(kind=dp), intent(in) :: m_matrix_loc(:, :, :, :)
+
+    real(kind=dp), intent(out) :: rave(:, :)
+    complex(kind=dp), intent(out) :: rho(:, :)
+    real(kind=dp), intent(out) :: r2ave(:)
+
+    complex(kind=dp), intent(in)  :: csheet(:, :, :)
+    real(kind=dp), intent(in)  :: sheet(:, :, :)
+    ! local variables
+    integer :: ind, nkp, nn, m, n, nkp_loc
+    integer :: my_node_id
+
+    my_node_id = mpirank(comm)
+
+    if (print_output%timing_level > 1 .and. print_output%iprint > 0) call io_stopwatch_start('wann: omega', timer)
+
+    ! Compute the density rho.
+    rho = 0.0_dp
+    do nkp_loc = 1, counts(my_node_id)
+      nkp = nkp_loc + displs(my_node_id)
+      do nn = 1, kmesh_info%nntot
+        do n = 1, num_wann
+          rho(n, nn) = rho(n, nn) + m_matrix_loc(n, n, nn, nkp_loc) * csheet(n, nn, nkp) 
+        end do
+      end do
+    end do
+
+!    call comms_allreduce(rho(1, 1), num_wann * kmesh_info%nntot, 'SUM', error, comm)
+!    if (allocated(error)) return
+
+    rho = rho/real(num_kpts, dp)
+
+    ! Compute the TDC center and spread.
+    rave = 0.0_dp
+    r2ave = 0.0_dp
+    do n = 1, num_wann
+      do nn = 1, kmesh_info%nntot
+        do ind = 1, 3
+          rave(ind, n) = kmesh_info%wb(nn) * aimag(log(rho(n, nn))) * kmesh_info%bk(ind, nn, 1)
+          ! use bk for the gmma point because bk should be independent of k
+        end do
+        r2ave(n) = r2ave(n) + 2 * kmesh_info%wb(nn) * (1.0_dp - abs(rho(n, nn)))
+      enddo
+    enddo
+
+    wann_spread%om_tot = sum(r2ave)
+!    do n = 1, num_wann
+!      wann_spread%om_tot = wann_spread%om_tot + r2ave(n)
+!    enddo
+
+    if (print_output%timing_level > 1 .and. print_output%iprint > 0) call io_stopwatch_stop('wann: omega', timer)
+    return
+
+  end subroutine tdc_omega
+
+  !================================================!
   subroutine wann_omega(csheet, sheet, rave, r2ave, rave2, wann_spread, num_wann, kmesh_info, &
                         num_kpts, print_output, wann_slwf, omega_invariant, counts, displs, &
                         ln_tmp_loc, m_matrix_loc, lambda_loc, first_pass, timer, error, comm)
@@ -2425,6 +2539,81 @@ contains
     return
 
   end subroutine wann_omega
+
+  !================================================!
+  subroutine tdc_domega(rho, num_wann, kmesh_info, num_kpts,  &
+          counts, displs, m_matrix_loc, cdodq_loc, timing_level, &
+          timer, error, comm, iprint, cdodq)
+    !================================================!
+    !
+    !   Calculate the Gradient of the TDC spread
+    !================================================
+
+    use w90_constants, only: cmplx_0
+    use w90_io, only: io_stopwatch_start, io_stopwatch_stop
+    use w90_comms, only: comms_gatherv, comms_bcast, comms_allreduce, &
+            w90comm_type, mpirank
+    use w90_types, only: kmesh_info_type, timer_list_type
+
+    implicit none
+
+    type(kmesh_info_type), intent(in) :: kmesh_info
+    type(timer_list_type), intent(inout) :: timer
+    type(w90comm_type), intent(in) :: comm
+    type(w90_error_type), allocatable, intent(out) :: error
+
+    integer, intent(in) :: num_wann
+    integer, intent(in) :: num_kpts
+    integer, intent(in) :: timing_level, iprint
+    integer, intent(in) :: counts(0:), displs(0:)
+
+    ! as we work on the local cdodq, returning the full cdodq array is now
+    ! made optional
+    complex(kind=dp), intent(out), optional :: cdodq(:, :, :)
+    complex(kind=dp), intent(in) :: m_matrix_loc(:, :, :, :)
+    complex(kind=dp), intent(in) :: rho(:, :)
+    complex(kind=dp), intent(out) :: cdodq_loc(:, :, :)
+
+    ! local
+    integer :: nkp, nn, m, n, ierr, nkp_loc
+    complex(kind=dp) :: mnn
+    integer :: my_node_id
+
+    my_node_id = mpirank(comm)
+
+    if (timing_level > 1 .and. iprint > 0) call io_stopwatch_start('wann: domega', timer)
+
+    ! cd0dq(m,n,nkp) is calculated
+    cdodq_loc = cmplx_0
+    do nkp_loc = 1, counts(my_node_id)
+      nkp = nkp_loc + displs(my_node_id)
+      do nn = 1, kmesh_info%nntot
+          do n = 1, num_wann
+            do m = 1, num_wann
+              cdodq_loc(m, n, nkp_loc) = cdodq_loc(m, n, nkp_loc) &
+                      + kmesh_info%wb(nn) * conjg(rho(n, nn)) / abs(rho(n, nn)) * m_matrix_loc(m, n, nn, nkp_loc)
+              cdodq_loc(m, n, nkp_loc) = 0.5_dp * (cdodq_loc(m, n, nkp_loc) - conjg(cdodq_loc(m, n, nkp_loc)))
+            enddo
+          enddo
+      enddo
+    enddo
+    cdodq_loc = cdodq_loc/real(num_kpts, dp)*4.0_dp
+
+    if (present(cdodq)) then
+      ! each process communicates its result to other processes
+      call comms_gatherv(cdodq_loc, num_wann*num_wann*counts(my_node_id), &
+              cdodq, num_wann*num_wann*counts, num_wann*num_wann*displs, error, comm)
+      if (allocated(error)) return
+
+      call comms_bcast(cdodq(1, 1, 1), num_wann*num_wann*num_kpts, error, comm)
+      if (allocated(error)) return
+    end if
+
+    if (timing_level > 1 .and. iprint > 0) call io_stopwatch_stop('wann: domega', timer)
+
+    return
+
+  end subroutine tdc_domega
 
   !================================================!
   subroutine wann_domega(csheet, sheet, rave, num_wann, kmesh_info, num_kpts, wann_slwf, &
