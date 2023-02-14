@@ -2150,6 +2150,7 @@ contains
 
   end subroutine wann_phases
 
+
   !================================================!
   subroutine tdc_omega(csheet, sheet, rave, r2ave, rho, wann_spread, num_wann, kmesh_info, &
           num_kpts, print_output, counts, displs, m_matrix_loc, timer, error, comm)
@@ -2161,6 +2162,7 @@ contains
     use w90_io, only: io_stopwatch_start, io_stopwatch_stop
     use w90_comms, only: comms_allreduce, w90comm_type, mpirank
     use w90_types, only: kmesh_info_type, print_output_type, timer_list_type
+    use tdc, only : setup, compute_permutation_of_bk, bk_perm, debug_print_bk_perm
 
     implicit none
 
@@ -2188,7 +2190,14 @@ contains
     integer :: ind, nkp, nn, m, n, nkp_loc
     integer :: my_node_id
 
+
     my_node_id = mpirank(comm)
+
+    call setup(nntot=kmesh_info%nntot,num_kpts=counts(my_node_id))
+    call compute_permutation_of_bk(nntot=kmesh_info%nntot,&
+      &    num_kpts=counts(my_node_id), bk=kmesh_info%bk)
+    call debug_print_bk_perm(nntot=kmesh_info%nntot,&
+      &    num_kpts=counts(my_node_id), bk=kmesh_info%bk)
 
     if (print_output%timing_level > 1 .and. print_output%iprint > 0) call io_stopwatch_start('wann: omega', timer)
 

@@ -122,6 +122,9 @@ overlap.o: ../overlap.F90 constants.o io.o utility.o types.o sitesym.o wannier90
 
 kmesh.o: ../kmesh.F90 constants.o io.o utility.o types.o 
 	 $(COMPILER) $(POSTOPTS) $(FCOPTS) -c ../kmesh.F90
+	
+tdc.o: ../tdc.F90
+	 $(COMPILER) $(POSTOPTS) $(FCOPTS) -c ../tdc.F90
 
 error_base.o: ../error_base.F90
 	 $(COMPILER) $(POSTOPTS) $(FCOPTS) -c ../error_base.F90
@@ -132,7 +135,9 @@ error.o: ../error.F90 error_base.o comms.o
 disentangle.o: ../disentangle.F90 constants.o io.o types.o sitesym.o comms.o wannier90_types.o
 	 $(COMPILER) $(POSTOPTS) $(FCOPTS) -c ../disentangle.F90
 
-wannierise.o: ../wannierise.F90 hamiltonian.o constants.o io.o utility.o types.o sitesym.o comms.o wannier90_types.o wannier90_readwrite.o error.o
+tdc.o: constants.o
+
+wannierise.o: ../wannierise.F90 hamiltonian.o constants.o io.o utility.o types.o sitesym.o comms.o wannier90_types.o wannier90_readwrite.o error.o tdc.o
 	 $(COMPILER) $(POSTOPTS) $(FCOPTS) -c ../wannierise.F90
 
 plot.o: ../plot.F90 constants.o io.o utility.o types.o hamiltonian.o ws_distance.o wannier90_types.o comms.o
